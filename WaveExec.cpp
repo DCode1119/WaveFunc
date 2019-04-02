@@ -1,4 +1,4 @@
-//Used IDE: Visual Studio S2015 
+//Used IDE: Visual Studio 2015 
 
 #include "stdafx.h"
 
