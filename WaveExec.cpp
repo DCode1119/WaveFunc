@@ -1,107 +1,148 @@
-//Used IDE: Visual Studio 2015 
+// Used IDE: Visual Studio 2015
 
-#include "stdafx.h"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <vector>
 
-#define _USE_MATH_DEFINES
+namespace {
 
-#include <fcntl.h>
-#include <math.h>
-#include <fcntl.h>
+constexpr double kPi = 3.14159265358979323846;
+constexpr std::uint32_t kDurationMs = 5000;
+constexpr std::uint32_t kSampleRate = 44100;
+constexpr std::uint16_t kNumChannels = 1;
+constexpr std::uint16_t kBitsPerSample = 16;
+constexpr double kFrequencyHz = 440.0;
+constexpr double kVolume = 1.0;
+constexpr const char* kOutputFileName = "test.wav";
 
-typedef struct waveHeader_tag
+using WaveFunction = double (*)(double timing);
+
+struct WaveHeader {
+	char chunkId[4] = {'R', 'I', 'F', 'F'};
+	std::uint32_t chunkSize = 0;
+	char format[4] = {'W', 'A', 'V', 'E'};
+
+	char subchunk1Id[4] = {'f', 'm', 't', ' '};
+	std::uint32_t subchunk1Size = 16;
+	std::uint16_t audioFormat = 1;
+	std::uint16_t numChannels = 0;
+	std::uint32_t sampleRate = 0;
+	std::uint32_t byteRate = 0;
+	std::uint16_t blockAlign = 0;
+	std::uint16_t bitsPerSample = 0;
+
+	char subchunk2Id[4] = {'d', 'a', 't', 'a'};
+	std::uint32_t subchunk2Size = 0;
+};
+
+static_assert(sizeof(WaveHeader) == 44, "PCM wave header must be 44 bytes");
+
+std::uint32_t CalculateSampleCount(std::uint32_t sampleRate, std::uint32_t durationMs)
 {
-	char ChunkID[4] = { 'R', 'I', 'F', 'F' };
-	unsigned int ChunkSize = 0;
-	char Format[4] = {'W', 'A', 'V', 'E'};
-
-	char Subchunk1ID[4] = { 'f', 'm', 't', ' ' };
-	unsigned int Subchunk1Size = 16;
-	unsigned short AudioFormat = 1;
-	unsigned short NumChannels = 0;
-	unsigned int SampleRate = 0;
-	unsigned int ByteRate = 0;
-	unsigned short BlockAlign = 0;
-	unsigned short BitsPerSample = 0;
-
-	char Subchunk2ID[4] = { 'd', 'a', 't', 'a' };
-	unsigned int Subchunk2Size = 0;
-}waveHeader;
-
-typedef double(*func)(double timing);
-
-void GenerateWaveHeader(waveHeader *p, unsigned short BitsPerSample, unsigned short NumChannels, unsigned int SampleRate, unsigned int DurationMSec);
-void Generate16bitWave(short *buffer, unsigned int SampleRate, unsigned int DurationMSec, double freq, double volume, func waveFunc);
-
-//d: phase degree
-inline double waveGenerator(double d)
-{
-	return sin(d);
-	//return (sin(d) + sin(d*3) + cos(d*2))/3;	//sine wave
+	return static_cast<std::uint32_t>(static_cast<std::uint64_t>(durationMs) * sampleRate / 1000ULL);
 }
+
+double WaveGenerator(double radians)
+{
+	return std::sin(radians);
+}
+
+WaveHeader GenerateWaveHeader(
+	std::uint16_t bitsPerSample,
+	std::uint16_t numChannels,
+	std::uint32_t sampleRate,
+	std::uint32_t durationMs)
+{
+	WaveHeader header;
+	header.bitsPerSample = bitsPerSample;
+	header.numChannels = numChannels;
+	header.sampleRate = sampleRate;
+	header.blockAlign = static_cast<std::uint16_t>(numChannels * bitsPerSample / 8);
+	header.byteRate = header.sampleRate * header.blockAlign;
+
+	const std::uint32_t sampleCount = CalculateSampleCount(sampleRate, durationMs);
+	header.subchunk2Size = sampleCount * header.blockAlign;
+	header.chunkSize = 36 + header.subchunk2Size;
+
+	return header;
+}
+
+void Generate16BitWave(
+	std::vector<std::int16_t>& buffer,
+	std::uint32_t sampleRate,
+	double frequencyHz,
+	double volume,
+	WaveFunction waveFunction)
+{
+	double normalizedVolume = volume;
+	if (normalizedVolume < 0.0) {
+		normalizedVolume = 0.0;
+	} else if (normalizedVolume > 1.0) {
+		normalizedVolume = 1.0;
+	}
+	const double amplitude = 32767.0 * normalizedVolume;
+	const double angularFrequency = 2.0 * kPi * frequencyHz;
+
+	for (std::size_t i = 0; i < buffer.size(); ++i) {
+		const double absoluteTime = static_cast<double>(i) / sampleRate;
+		const double radians = angularFrequency * absoluteTime;
+		const double sample = waveFunction(radians);
+		buffer[i] = static_cast<std::int16_t>(sample * amplitude);
+	}
+}
+
+bool WriteWaveFile(const char* fileName, const WaveHeader& header, const std::vector<std::int16_t>& samples)
+{
+	std::FILE* file = nullptr;
+#ifdef _MSC_VER
+	if (fopen_s(&file, fileName, "wb") != 0) {
+		file = nullptr;
+	}
+#else
+	file = std::fopen(fileName, "wb");
+#endif
+
+	if (file == nullptr) {
+		std::perror("Failed to open output file");
+		return false;
+	}
+
+	const bool wroteHeader = std::fwrite(&header, sizeof(header), 1, file) == 1;
+	const bool wroteSamples =
+		std::fwrite(samples.data(), sizeof(samples[0]), samples.size(), file) == samples.size();
+
+	if (std::fclose(file) != 0) {
+		std::perror("Failed to close output file");
+		return false;
+	}
+
+	if (!wroteHeader || !wroteSamples) {
+		std::fprintf(stderr, "Failed to write the complete wave file.\n");
+		return false;
+	}
+
+	return true;
+}
+
+}  // namespace
 
 int main()
 {
-	//Specification
-	unsigned int DurationMSec = 5000;	//5 Seconds
-	unsigned int SampleRate = 44100;	//44.10Khz Sampling
-	unsigned short NumChannels = 1;		//Mono
-	unsigned short BitsPerSample = 16;	//16 bits per sample
-
-	//Header generation
-	waveHeader hdr;
-	GenerateWaveHeader(&hdr, BitsPerSample, NumChannels, SampleRate, DurationMSec);
-	
-	//Waveform Generation
-	unsigned int nSamples = DurationMSec * hdr.SampleRate / 1000;
-	short *channel = new short[nSamples];
-	memset(channel, 0, nSamples * sizeof(short));
-	Generate16bitWave(channel, hdr.SampleRate, DurationMSec, 440, 1, waveGenerator);
-
-	//File Write
-	FILE *fp = nullptr;
-	fopen_s(&fp, "test.wav", "w+b");
-	fwrite(&hdr, sizeof(waveHeader), 1, fp);
-	fwrite(channel, sizeof(short), hdr.Subchunk2Size / sizeof(short), fp);
-	fclose(fp);
-	
-#if 0
-	fopen_s(&fp, "test.csv", "w+b");
-	for (unsigned int i = 0; i < nSamples; i++)
-		fprintf(fp, "%d,\n", channel[i]);
-	fclose(fp);
-#endif
-
-	delete[] channel;
-	return 0;
-}
-
-void GenerateWaveHeader(waveHeader *p, unsigned short BitsPerSample, unsigned short NumChannels, unsigned int SampleRate, unsigned int DurationMSec)
-{
-	p->BitsPerSample = BitsPerSample;
-	p->NumChannels = NumChannels;
-	p->SampleRate = SampleRate;
-	p->ByteRate = p->SampleRate * p->NumChannels * p->BitsPerSample / 8;
-	p->BlockAlign = p->Subchunk1Size * p->NumChannels / 8;
-	p->Subchunk2Size = DurationMSec * p->ByteRate / 1000;
-	p->ChunkSize = p->Subchunk2Size + sizeof(waveHeader) - 8;
-}
-
-void Generate16bitWave(short *buffer, unsigned int SampleRate, unsigned int DurationMSec, double freq, double volume, func waveFunc)
-{
-	const double radian_convert_coef = M_PI / 180.0;
-	unsigned int nSamples = DurationMSec * SampleRate / 1000;
-	double scale = 32767.0 * volume;
-	double freqTime = 1.0 / freq;
-
-	//Degre conversion
-	//freqTime : x = absolutTime * 360
-	//x = absoluteTime * 360 / freqTime
-	for (unsigned int i = 0; i < nSamples; i++)
-	{
-		double absoluteTime = double(i) / SampleRate;
-		double degree = absoluteTime * 360 / freqTime;
-		double radian = degree * radian_convert_coef;
-		double sample = waveFunc(radian);
-		buffer[i] = (short)(sample * scale);
+	if (kBitsPerSample != 16) {
+		std::fprintf(stderr, "This sample currently supports only 16-bit PCM output.\n");
+		return EXIT_FAILURE;
 	}
+
+	const WaveHeader header =
+		GenerateWaveHeader(kBitsPerSample, kNumChannels, kSampleRate, kDurationMs);
+	std::vector<std::int16_t> samples(CalculateSampleCount(kSampleRate, kDurationMs), 0);
+	Generate16BitWave(samples, kSampleRate, kFrequencyHz, kVolume, WaveGenerator);
+
+	if (!WriteWaveFile(kOutputFileName, header, samples)) {
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
 }
